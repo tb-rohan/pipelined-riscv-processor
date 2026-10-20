@@ -29,75 +29,171 @@ As a second-year BTech student interested in digital VLSI design, computer archi
 
 ## 2. Processor Architecture & Five-Stage Pipeline
 
-```
-       +--------------------------------------------------------------------------------+
-       |                               CORE PIPELINE                                    |
-       |                                                                                |
-       |  +-------+     +-------+     +-------+     +-------+     +-------+             |
-       |  |  IF   | --> |  ID   | --> |  EX   | --> |  MEM  | --> |  WB   |             |
-       |  | Stage|     | Stage |     | Stage |     | Stage |     | Stage |             |
-       |  +-------+     +-------+     +-------+     +-------+     +-------+             |
-       |      |             |             ^             |             |                 |
-       |      |             |             |             |             |                 |
-       |      |             |             +=============+=============+                 |
-       |      |             |             EX/MEM & MEM/WB Forwarding                    |
-       |      |             |                                                           |
-       |      |             +---------> [ Hazard Unit ] ----------------+               |
-       |      |                           (Load-Use Stalls,             |               |
-       |      |                            Branch Flush)                v               |
-       |      v                                                    PC Update            |
-       |  [ IMEM ] (16 KB)                                              |               |
-       |                                                                v               |
-       |                                                     [ DMEM ] (16 KB)           |
-       +--------------------------------------------------------------------------------+
-                                           |
-                              +------------+------------+
-                              |                         |
-                              v                         v
-                       [ Host Mailbox ]          [ Timer / HPMU ]
-                         (0x80000000)              (0x80000020)
+### 2.1 Pipelined Datapath & Control Architecture
+
+The processor implements a classic 5-stage in-order RISC pipeline with synchronized stage registers, combinational forwarding multiplexers, and an integrated hazard detection interlock unit.
+
+```mermaid
+flowchart TD
+    %% --- Stage 1: Instruction Fetch (IF) ---
+    subgraph IF_STAGE ["1. Instruction Fetch (IF)"]
+        direction TB
+        PCMUX{"Next PC<br/>Mux"}
+        PC_REG["Program Counter<br/>(pc_q)"]
+        PC4_ADD["PC + 4<br/>Adder"]
+        IMEM_ROM["Instruction Memory<br/>(16 KB imem)"]
+        
+        PCMUX -->|"next_pc"| PC_REG
+        PC_REG -->|"pc_q"| PC4_ADD
+        PC_REG -->|"imem_addr"| IMEM_ROM
+    end
+
+    %% --- Pipeline Register IF/ID ---
+    subgraph REG_IF_ID ["Pipeline Register: IF / ID"]
+        PIPE_IF_ID["pipe_reg_if_id<br/>[PC, PC+4, Instruction, Valid]"]
+    end
+
+    PC4_ADD -->|"if_pc_plus4"| PIPE_IF_ID
+    IMEM_ROM -->|"imem_rdata"| PIPE_IF_ID
+    PC_REG -->|"if_pc"| PIPE_IF_ID
+
+    %% --- Stage 2: Instruction Decode (ID) ---
+    subgraph ID_STAGE ["2. Instruction Decode (ID)"]
+        direction TB
+        CTRL_DEC["Control Decoder<br/>(decoder.sv)"]
+        REG_FILE["Register File (32 x 32)<br/>(x0 = 0, Write-First)"]
+        IMM_GEN["Immediate Generator<br/>(imm_gen.sv)"]
+        
+        PIPE_IF_ID -->|"id_inst[6:0]"| CTRL_DEC
+        PIPE_IF_ID -->|"rs1, rs2"| REG_FILE
+        PIPE_IF_ID -->|"id_inst"| IMM_GEN
+    end
+
+    %% --- Pipeline Register ID/EX ---
+    subgraph REG_ID_EX ["Pipeline Register: ID / EX"]
+        PIPE_ID_EX["pipe_reg_id_ex<br/>[Ctrl Sigs, rs1/rs2 Data, Imm, PC, rd]"]
+    end
+
+    CTRL_DEC --> PIPE_ID_EX
+    REG_FILE --> PIPE_ID_EX
+    IMM_GEN --> PIPE_ID_EX
+    PIPE_IF_ID -->|"id_pc, id_pc_plus4"| PIPE_ID_EX
+
+    %% --- Stage 3: Execute (EX) ---
+    subgraph EX_STAGE ["3. Execute (EX)"]
+        direction TB
+        FWD_MUX_A{"Fwd Mux A"}
+        FWD_MUX_B{"Fwd Mux B"}
+        ALU_32["32-bit ALU<br/>(alu.sv)"]
+        BR_UNIT["Branch & Jump Unit<br/>(branch_unit.sv)"]
+        
+        PIPE_ID_EX -->|"id_ex_rs1"| FWD_MUX_A
+        PIPE_ID_EX -->|"id_ex_rs2"| FWD_MUX_B
+        FWD_MUX_A -->|"Operand A"| ALU_32
+        FWD_MUX_B -->|"Operand B"| ALU_32
+        FWD_MUX_A --> BR_UNIT
+        FWD_MUX_B --> BR_UNIT
+        PIPE_ID_EX -->|"ex_pc, imm"| BR_UNIT
+    end
+
+    %% --- Pipeline Register EX/MEM ---
+    subgraph REG_EX_MEM ["Pipeline Register: EX / MEM"]
+        PIPE_EX_MEM["pipe_reg_ex_mem<br/>[ALU Out, Store Data, rd, Ctrls]"]
+    end
+
+    ALU_32 -->|"ex_alu_out"| PIPE_EX_MEM
+    FWD_MUX_B -->|"ex_wdata"| PIPE_EX_MEM
+    PIPE_ID_EX -->|"ex_rd, ctrls"| PIPE_EX_MEM
+
+    %% --- Stage 4: Memory Access (MEM) ---
+    subgraph MEM_STAGE ["4. Memory Access (MEM)"]
+        direction TB
+        LSU["Load/Store Unit<br/>(load_store_unit.sv)"]
+        BUS_INT["Bus Interconnect<br/>& Data Memory (dmem)"]
+        
+        PIPE_EX_MEM -->|"alu_out, wdata"| LSU
+        LSU <-->|"byte/half/word"| BUS_INT
+    end
+
+    %% --- Pipeline Register MEM/WB ---
+    subgraph REG_MEM_WB ["Pipeline Register: MEM / WB"]
+        PIPE_MEM_WB["pipe_reg_mem_wb<br/>[ALU Out, Mem Data, rd, Ctrls]"]
+    end
+
+    PIPE_EX_MEM -->|"mem_alu_out, rd"| PIPE_MEM_WB
+    LSU -->|"mem_lsu_rdata"| PIPE_MEM_WB
+
+    %% --- Stage 5: Writeback (WB) ---
+    subgraph WB_STAGE ["5. Writeback (WB)"]
+        direction TB
+        WB_MUX{"WB Mux<br/>(wb_wb_src)"}
+        
+        PIPE_MEM_WB -->|"ALU / Mem / PC+4 / Imm"| WB_MUX
+    end
+
+    %% --- Hazard & Forwarding Units ---
+    subgraph CONTROL_FEEDBACK ["Hazard & Forwarding Feedback Networks"]
+        HAZARD_UNIT["Hazard Detection Unit<br/>(hazard_unit.sv)"]
+        FWD_UNIT["Forwarding Unit<br/>(forwarding_unit.sv)"]
+    end
+
+    %% Writeback to Regfile
+    WB_MUX ==>|"wb_final_data (when rd != 0)"| REG_FILE
+
+    %% Forwarding Paths
+    PIPE_EX_MEM -.->|"Priority 1: ex_mem_rd & ALU out"| FWD_UNIT
+    PIPE_MEM_WB -.->|"Priority 2: mem_wb_rd & WB data"| FWD_UNIT
+    FWD_UNIT ==>|"forward_a[1:0]"| FWD_MUX_A
+    FWD_UNIT ==>|"forward_b[1:0]"| FWD_MUX_B
+
+    %% Branch Decision Path
+    BR_UNIT ==>|"take_branch_ex & target_pc_ex"| PCMUX
+    PC4_ADD -.->|"sequential PC+4"| PCMUX
+
+    %% Hazard Stall & Flush Paths
+    PIPE_ID_EX -.->|"Load in EX (mem_read)"| HAZARD_UNIT
+    PIPE_IF_ID -.->|"rs1, rs2 in ID"| HAZARD_UNIT
+    BR_UNIT -.->|"Branch / Jump Taken"| HAZARD_UNIT
+    
+    HAZARD_UNIT ==>|"stall_pc"| PC_REG
+    HAZARD_UNIT ==>|"stall_if_id"| PIPE_IF_ID
+    HAZARD_UNIT ==>|"flush_id_ex (insert NOP bubble)"| PIPE_ID_EX
+    HAZARD_UNIT ==>|"flush_if_id (flush on branch/jump)"| PIPE_IF_ID
 ```
 
-### 2.1 Pipeline Stages
+### 2.2 Pipeline Stage Walkthrough & Control Interaction
+
 1. **Instruction Fetch (IF)**:
-   - Program Counter register (`pc_q`) generates instruction fetch addresses.
-   - Harvard instruction memory (`imem`) is read combinationally, latching the fetched instruction and $PC+4$ into `pipe_reg_if_id` on the rising clock edge.
+   - Maintains the 32-bit Program Counter (`pc_q`). The next PC multiplexer selects between sequential $PC + 4$, branch/jump targets from the EX stage (`target_pc_ex`), or freezes the current PC when stalled (`stall_pc`).
+   - Instruction memory (`imem`) performs a single-cycle combinational read, passing instruction word and fetch metadata to `pipe_reg_if_id` on each rising clock edge.
 2. **Instruction Decode (ID)**:
-   - Decodes opcode, register indices (`rs1`, `rs2`, `rd`), immediate fields, and instruction formats.
-   - Dual-read register file (`regfile.sv`) reads source registers with register `x0` hardwired to zero and internal write-through forwarding.
-   - Generates sign-extended 32-bit immediates via `imm_gen.sv` supporting I, S, B, U, and J formats.
+   - Decodes opcode, format types, register source/dest numbers (`rs1`, `rs2`, `rd`), and ALU/memory control signals.
+   - Dual-read register file (`regfile.sv`) outputs source register contents combinationally. Register `x0` is hardwired to 0. An internal write-first bypass returns current-cycle write data if reading the destination register being committed in WB.
+   - Sign-extends immediates across all 5 RV32I formats (I, S, B, U, J) via `imm_gen.sv`.
 3. **Execute (EX)**:
-   - 32-bit ALU (`alu.sv`) computes arithmetic (ADD, SUB), logical (AND, OR, XOR), shifts (SLL, SRL, SRA), and comparisons (SLT, SLTU).
-   - Branch comparator (`branch_unit.sv`) evaluates branch conditions (BEQ, BNE, BLT, BGE, BLTU, BGEU) and jump targets (JAL, JALR).
-   - Multiplexers driven by `forwarding_unit.sv` select between register operands and forwarded results.
+   - Evaluates arithmetic, boolean logic, and shift operations in the 32-bit ALU (`alu.sv`).
+   - Branch comparator (`branch_unit.sv`) evaluates branch comparisons (signed/unsigned equality and magnitude) and calculates branch/jump targets (`target_pc_ex = ex_pc + imm` or `ex_rs1 + imm` for JALR).
+   - Forwarding multiplexers select between the decoded register data and forwarded values from downstream stages.
 4. **Memory Access (MEM)**:
-   - Load/Store Unit (`load_store_unit.sv`) formats write strobes and extracts/sign-extends load data for byte, halfword, and word transactions.
-   - Interfaces `dmem` and memory-mapped peripheral registers over `bus_interconnect.sv`.
+   - Dedicated Load/Store Unit (`load_store_unit.sv`) aligns byte and halfword store data with appropriate byte write strobes (`dmem_wstrb[3:0]`), and handles sign-extension or zero-extension for loads (LB, LBU, LH, LHU, LW).
+   - Routes accesses across the memory bus (`bus_interconnect.sv`) to local data memory (`dmem`) or peripheral addresses.
 5. **Writeback (WB)**:
-   - Multiplexes destination register data from ALU result, memory load data, $PC+4$ link address, or upper immediate.
-   - Commits write data to `regfile` on rising clock edge when `reg_write` is active and $rd \neq 0$.
+   - Final multiplexer selects commit data from the ALU output, memory load data, $PC + 4$ (for JAL/JALR link register saving), or immediate data (for LUI).
+   - On the rising clock edge, if `wb_reg_write` is active and $rd \neq 0$, the selected value is written to the register file.
 
-### 2.2 Forwarding & Hazard Handling
+### 2.3 Interaction of Forwarding & Hazard Interlocks
 
-#### Forwarding Network (`forwarding_unit.sv`)
-Monitors destination registers in EX/MEM and MEM/WB stages:
-- **Priority 1 (EX/MEM Forwarding)**: If the EX/MEM stage is writing to a register ($rd \neq 0$) matching the current EX stage source register (`rs1` or `rs2`), data is forwarded directly from the MEM stage ALU output (`mem_fwd_data`).
-- **Priority 2 (MEM/WB Forwarding)**: If the MEM/WB stage is writing to a register ($rd \neq 0$) matching the current EX stage source register (and was not forwarded by EX/MEM), data is forwarded from the WB commit value (`wb_final_data`).
-- **Default**: In the absence of data dependencies, operands default to values read from the register file.
-
-#### Hazard Detection & Interlocks (`hazard_unit.sv`)
-- **Load-Use Data Hazard**:
-  When an instruction in ID depends on the result of a load instruction currently in EX (`mem_read_ex == 1` and `rd_ex == rs1_id || rd_ex == rs2_id`):
-  1. Freezes Program Counter (`stall_pc = 1`) and IF/ID stage (`stall_if_id = 1`) for 1 clock cycle.
-  2. Inserts a bubble (NOP: `addi x0, x0, 0`) into ID/EX (`flush_id_ex = 1`).
-  3. In the subsequent cycle, the load advances to MEM/WB, allowing normal MEM/WB forwarding into EX.
-- **Control Hazards (Branches & Jumps)**:
-  Branches and jumps are evaluated in the EX stage. When a branch is taken or a jump occurs:
-  1. PC is updated with the branch/jump target.
-  2. Speculative instructions in IF/ID and ID/EX are flushed (`flush_if_id = 1`, `flush_id_ex = 1`).
-  3. The branch flush penalty is **exactly 2 clock cycles**.
-- **Multi-Cycle Bus Stalls**:
-  During bus wait states (`dmem_stall == 1`), the hazard unit stalls `pc`, `if_id`, `id_ex`, `ex_mem` and asserts `flush_mem_wb = dmem_stall`, inserting a synchronous bubble into the WB stage to prevent duplicate instruction retirement.
+* **Resolving RAW Hazards via Forwarding:** When an instruction in EX requires a register written by an instruction in MEM or WB, `forwarding_unit.sv` bypasses the register file without stalling:
+  - **Priority 1 (EX-to-EX):** Forwarded from the immediate prior instruction in MEM (`mem_fwd_data`).
+  - **Priority 2 (MEM-to-EX):** Forwarded from the WB commit stage (`wb_final_data`) if not superseded by Priority 1.
+* **Resolving Load-Use Hazards via Interlocks:** Because load data from memory is not available until the end of the MEM stage, an instruction in ID needing a load result from EX cannot be satisfied by forwarding. The `hazard_unit.sv` detects `ex_mem_read && (ex_rd == id_rs1 || ex_rd == id_rs2)`:
+  - Freezes `pc_q` (`stall_pc = 1`) and the IF/ID register (`stall_if_id = 1`).
+  - Clears control signals in `pipe_reg_id_ex` (`flush_id_ex = 1`), injecting a single-cycle NOP bubble into EX.
+  - In the next clock cycle, the load advances to MEM, where normal Priority 1 forwarding routes the memory data to EX.
+* **Control Hazards on Taken Branches & Jumps:**
+  - Branch condition and target calculations resolve in the EX stage.
+  - When taken (`take_branch_ex = 1`), both instructions currently fetched speculatively into IF/ID and ID/EX are purged (`flush_if_id = 1`, `flush_id_ex = 1`).
+  - Next cycle, the target address is fetched into IF, resulting in an exact **2-cycle penalty**. Non-taken branches incur zero penalty.
 
 ---
 
