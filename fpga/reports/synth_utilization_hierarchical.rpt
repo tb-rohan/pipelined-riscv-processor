@@ -1,0 +1,41 @@
+Copyright 1986-2022 Xilinx, Inc. All Rights Reserved. Copyright 2022-2026 Advanced Micro Devices, Inc. All Rights Reserved.
+-------------------------------------------------------------------------------------------------------------------------------------------------
+| Tool Version : Vivado v.2026.1 (win64) Build 6511674 Tue Jun 16 11:02:23 MDT 2026
+| Date         : Tue Oct 20 15:16:42 2026
+| Host         : FLEX-5 running 64-bit major release  (build 9200)
+| Command      : report_utilization -hierarchical -file C:/Users/FLEX/OneDrive/Desktop/PP/RISC-V/fpga/reports/synth_utilization_hierarchical.rpt
+| Design       : cpu_fpga_top
+| Device       : xc7a100tcsg324-1
+| Speed File   : -1
+| Design State : Synthesized
+-------------------------------------------------------------------------------------------------------------------------------------------------
+
+Utilization Design Information
+
+Table of Contents
+-----------------
+1. Utilization by Hierarchy
+
+1. Utilization by Hierarchy
+---------------------------
+
++---------------------+--------------------+------------+------------+---------+------+------+--------+--------+------------+
+|       Instance      |       Module       | Total LUTs | Logic LUTs | LUTRAMs | SRLs |  FFs | RAMB36 | RAMB18 | DSP Blocks |
++---------------------+--------------------+------------+------------+---------+------+------+--------+--------+------------+
+| cpu_fpga_top        |              (top) |       4863 |       2571 |    2292 |    0 | 2177 |      0 |      0 |          0 |
+|   (cpu_fpga_top)    |              (top) |         14 |         14 |       0 |    0 |  128 |      0 |      0 |          0 |
+|   u_cpu_top         | cpu_standalone_top |       4849 |       2557 |    2292 |    0 | 2049 |      0 |      0 |          0 |
+|     u_timer         |              timer |         64 |         64 |       0 |    0 |  192 |      0 |      0 |          0 |
+|     u_core          |         rv32i_core |       2185 |       2185 |       0 |    0 | 1657 |      0 |      0 |          0 |
+|       u_regfile     |            regfile |        577 |        577 |       0 |    0 |  992 |      0 |      0 |          0 |
+|       u_pipe_ex_mem |    pipe_reg_ex_mem |        683 |        683 |       0 |    0 |  173 |      0 |      0 |          0 |
+|       u_pipe_id_ex  |     pipe_reg_id_ex |        693 |        693 |       0 |    0 |  192 |      0 |      0 |          0 |
+|       u_pipe_if_id  |     pipe_reg_if_id |         96 |         96 |       0 |    0 |   96 |      0 |      0 |          0 |
+|       u_pipe_mem_wb |    pipe_reg_mem_wb |        136 |        136 |       0 |    0 |  168 |      0 |      0 |          0 |
+|     u_dmem          |               dmem |       2177 |        129 |    2048 |    0 |    0 |      0 |      0 |          0 |
+|       u_ram         |           ram_sync |       2177 |        129 |    2048 |    0 |    0 |      0 |      0 |          0 |
+|     u_host          |     host_interface |        114 |        114 |       0 |    0 |  192 |      0 |      0 |          0 |
+|     u_imem          |               imem |        304 |         60 |     244 |    0 |    0 |      0 |      0 |          0 |
++---------------------+--------------------+------------+------------+---------+------+------+--------+--------+------------+
+
+
