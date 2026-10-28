@@ -1,219 +1,94 @@
-# System Register Map: Standalone RV32I Processor Subsystem
+# System Register Map: RISC-V + INT8 CNN Accelerator SoC
 
-> **Mandatory Hardware Disclaimer**  
-> *This project was validated using software-based RTL simulation and FPGA toolchain flows. No physical FPGA board was used for hardware testing.*
+> **Hardware Implementation Notice**
+> *This SoC design was verified in gate-level and cycle-accurate RTL simulation (Icarus Verilog, Verilator) and synthesized using the AMD Vivado / Yosys FPGA flows targeting Artix-7. No physical FPGA development board was connected.*
 
-This document provides a bit-level register specification for all peripherals and memory-mapped devices across the Standalone RV32I Processor subsystem.
+This document specifies the exact, RTL-verified address space and bit-level register definitions for all memory-mapped peripherals in the integrated System-on-Chip.
 
 ---
 
-## 1. Peripheral Base Addresses
+## 1. SoC Memory & Peripheral Address Space
 
-| Peripheral Subsystem | Base Address | End Address | Size | Description |
+| Region | Base Address | End Address | Size | Function / Module |
 | :--- | :--- | :--- | :---: | :--- |
-| `host_interface` | `0x8000_0000` | `0x8000_001F` | 32 B | Host-CPU interactive communication & control |
-| `timer` / HPMU | `0x8000_0020` | `0x8000_003F` | 32 B | 64-bit cycle counter & Hardware Performance Monitor |
-| `uart_lite` | `0x8000_0040` | `0x8000_005F` | 32 B | Non-blocking UART transmitter / receiver |
-| `accel_adapter` | `0x8000_1000` | `0x8000_103F` | 64 B | INT8 CNN hardware accelerator control window |
+| **Instruction Memory (IMEM)** | `0x0000_0000` | `0x0000_3FFF` | 16 KB | Synchronous dual-port RAM for RV32I program execution (`imem.sv`) |
+| **Data Memory (DMEM)** | `0x0000_4000` | `0x0000_7FFF` | 16 KB | Synchronous dual-port RAM for data, tensors, and stack (`dmem.sv`) |
+| **Host Mailbox Interface** | `0x8000_0000` | `0x8000_001F` | 32 B | Test harness command dispatch, operand passing, and status (`host_interface.sv`) |
+| **Timer / Performance Counters**| `0x8000_0020` | `0x8000_003F` | 32 B | 64-bit cycle timer, instruction retired counter, stall monitors (`timer.sv`) |
+| **UART Lite** | `0x8000_0040` | `0x8000_005F` | 32 B | 8N1 serial communication interface (`uart_lite.sv`) |
+| **CNN Accelerator Interface** | `0x8000_1000` | `0x8000_10FF` | 256 B | AXI4-Lite memory-mapped control and data streaming window (`accel_adapter.sv`) |
 
 ---
 
-## 2. Host Interface Register Specification (`0x8000_0000`)
+## 2. Host Interface Register Map (`0x8000_0000`)
 
-### 2.1 `HOST_CTRL` (`0x8000_0000`) - Control & Command Register
-- **Offset:** `0x00`
-- **Reset:** `0x0000_0000`
-- **Access:** Read / Write
+Used by the simulation testbench and interactive runners to communicate with firmware running on the RV32I core.
 
-| Bits | Field Name | Access | Reset | Description |
+| Offset | Register Name | Access | Reset Value | Description |
 | :---: | :--- | :---: | :---: | :--- |
-| 31:16 | `RESERVED` | RO | 0x0 | Reserved, write as 0 |
-| 15:8 | `COMMAND` | RW | 0x0 | Operation command opcode dispatched to CPU firmware:<br>`0x01` = Add, `0x02` = Sub, `0x03` = Mul, `0x04` = Div<br>`0x05` = AND, `0x06` = OR, `0x07` = XOR, `0x08` = NOT<br>`0x09` = SLL, `0x0A` = SRL, `0x0B` = SRA<br>`0x0C` = SLT, `0x0D` = SLTU<br>`0x0E` = Full 37-Instruction RV32I ISA Verification |
-| 7:2 | `RESERVED` | RO | 0x0 | Reserved |
-| 1 | `ACK_DONE` | RW | 0x0 | Acknowledged by host or CPU after completion |
-| 0 | `REQ_START` | RW | 0x0 | Asserted by host (1) to trigger execution; cleared by CPU |
-
-### 2.2 `HOST_OP_A` (`0x8000_0004`) - Operand A Register
-- **Offset:** `0x04`
-- **Reset:** `0x0000_0000`
-- **Access:** Read / Write
-- **Description:** First 32-bit operand passed to CPU computation routines.
-
-### 2.3 `HOST_OP_B` (`0x8000_0008`) - Operand B Register
-- **Offset:** `0x08`
-- **Reset:** `0x0000_0000`
-- **Access:** Read / Write
-- **Description:** Second 32-bit operand passed to CPU computation routines.
-
-### 2.4 `HOST_RESULT` (`0x8000_000C`) - Result Low Register
-- **Offset:** `0x0C`
-- **Reset:** `0x0000_0000`
-- **Access:** Read / Write
-- **Description:** Lower 32 bits of arithmetic result or classification predicted class (0..9).
-
-### 2.5 `HOST_RESULT_HI` (`0x8000_0010`) - Result High Register
-- **Offset:** `0x10`
-- **Reset:** `0x0000_0000`
-- **Access:** Read / Write
-- **Description:** Upper 32 bits of multiplication product, division remainder, or winning class score.
-
-### 2.6 `HOST_STATUS` (`0x8000_0014`) - Execution Status Register
-- **Offset:** `0x14`
-- **Reset:** `0x0000_0000`
-- **Access:** Read / Write
-- **Description:** Returns elapsed clock cycles or status flag (`0x0` = IDLE, `0x1` = BUSY, `0x2` = PASS, `0x3` = FAIL).
+| `0x00` | `HOST_CTRL` | R/W | `0x0000_0000` | Bit [0]: `REQ_START` (1 = Host requests CPU computation)<br>Bit [1]: `ACK_DONE` (1 = CPU signals completion to host)<br>Bits [15:8]: `COMMAND` opcode (`1`=MNIST Inference, `2`=3-Layer Test, `3`=Mul, `4`=Div, `14`=Full ISA) |
+| `0x04` | `HOST_OP_A` | R/W | `0x0000_0000` | First 32-bit operand passed from host to CPU |
+| `0x08` | `HOST_OP_B` | R/W | `0x0000_0000` | Second 32-bit operand passed from host to CPU |
+| `0x0C` | `HOST_RESULT` | R/W | `0x0000_0000` | Low 32 bits of arithmetic result or winning class prediction (0..9) |
+| `0x10` | `HOST_RESULT_HI` | R/W | `0x0000_0000` | Upper 32 bits of math product/remainder, or winning class score |
+| `0x14` | `HOST_STATUS` | R/W | `0x0000_0000` | Returns execution cycle counter or status flag word |
 
 ---
 
-## 3. Timer & Hardware Performance Monitoring Unit (`0x8000_0020`)
+## 3. Hardware Timer & Performance Counters (`0x8000_0020`)
 
-### 3.1 `CYCLES_LO` (`0x8000_0020`) - System Cycle Counter Low
-- **Offset:** `0x20`
-- **Reset:** `0x0000_0000`
-- **Access:** Read / Write
-- **Description:** Lower 32 bits of 64-bit continuous free-running hardware cycle counter.
+Real-time 64-bit cycle counter and hardware performance monitor registers.
 
-### 3.2 `CYCLES_HI` (`0x8000_0024`) - System Cycle Counter High
-- **Offset:** `0x24`
-- **Reset:** `0x0000_0000`
-- **Access:** Read / Write
-- **Description:** Upper 32 bits of 64-bit continuous free-running hardware cycle counter.
-
-### 3.3 `INSTRET` (`0x8000_0028`) - Instructions Retired Counter
-- **Offset:** `0x28`
-- **Reset:** `0x0000_0000`
-- **Access:** Read / Write
-- **Description:** 32-bit counter incrementing each time an instruction commits at the Writeback (WB) stage without a stall. Used to calculate CPI (`CYCLES / INSTRET`).
-
-### 3.4 `LOAD_USE_STALLS` (`0x8000_002C`) - Load-Use Hazard Stall Counter
-- **Offset:** `0x2C`
-- **Reset:** `0x0000_0000`
-- **Access:** Read / Write
-- **Description:** Increments when the hazard detection unit injects a pipeline bubble due to a load-use RAW dependency.
-
-### 3.5 `BRANCH_FLUSHES` (`0x8000_0030`) - Branch & Jump Flush Counter
-- **Offset:** `0x30`
-- **Reset:** `0x0000_0000`
-- **Access:** Read / Write
-- **Description:** Increments each time a taken branch or jump mispredicts and flushes instructions from IF/ID and ID/EX stages.
-
-### 3.6 `BUS_STALLS` (`0x8000_0034`) - Bus Wait-State Stall Counter
-- **Offset:** `0x34`
-- **Reset:** `0x0000_0000`
-- **Access:** Read / Write
-- **Description:** Increments for every clock cycle the CPU pipeline is stalled waiting for external bus peripherals (`dmem_stall`).
-
----
-
-## 4. UART Lite Register Specification (`0x8000_0040`)
-
-### 4.1 `UART_TX_DATA` (`0x8000_0040`) - Transmit Data Register
-- **Offset:** `0x40`
-- **Access:** Write Only
-- **Description:** Writing bits [7:0] initiates character transmission. In simulation, immediately prints to standard output.
-
-### 4.2 `UART_STATUS` (`0x8000_0044`) - Status Register
-- **Offset:** `0x44`
-- **Access:** Read Only
-- **Fields:**
-  - `Bit 0`: `TX_READY` (1 = Transmitter buffer ready to accept next byte).
-  - `Bit 1`: `RX_VALID` (1 = Valid received character in `UART_RX_DATA`).
-
-### 4.3 `UART_RX_DATA` (`0x8000_0048`) - Receive Data Register
-- **Offset:** `0x48`
-- **Access:** Read Only
-- **Description:** Returns received 8-bit character.
-
----
-
-## 5. INT8 CNN Accelerator MMIO Register Specification (`0x8000_1000`)
-
-### 5.1 `ACCEL_CTRL` (`0x8000_1000`) - Accelerator Control
-- **Offset:** `0x00`
-- **Reset:** `0x0000_0000`
-- **Access:** Read / Write
-
-| Bits | Field Name | Access | Reset | Description |
-| :---: | :--- | :---: | :---: | :--- |
-| 31:3 | `RESERVED` | RO | 0x0 | Reserved |
-| 2 | `AUTO_RESTART`| RW | 0x0 | Automatically process next tile in queue |
-| 1 | `SOFT_RESET` | RW | 0x0 | Reset accelerator pipeline and registers |
-| 0 | `START` | RW | 0x0 | Trigger layer computation pulse |
-
-### 5.2 `ACCEL_STATUS` (`0x8000_1004`) - Accelerator Status
-- **Offset:** `0x04`
-- **Reset:** `0x0000_0000`
-- **Access:** Read Only
-
-| Bits | Field Name | Access | Reset | Description |
-| :---: | :--- | :---: | :---: | :--- |
-| 31:4 | `RESERVED` | RO | 0x0 | Reserved |
-| 3 | `TIMEOUT` | RO | 0x0 | Bus watchdog triggered timeout |
-| 2 | `ERROR` | RO | 0x0 | Configuration parameter error |
-| 1 | `DONE` | RO | 0x0 | Layer computation finished |
-| 0 | `BUSY` | RO | 0x0 | Hardware compute engine active |
-
-### 5.3 `ACCEL_CAP` (`0x8000_1008`) - Accelerator Capability & Hardware Version
-- **Offset:** `0x08`
-- **Reset:** `0x0104_0408`
-- **Access:** Read Only
-
-| Bits | Field Name | Value | Description |
+| Offset | Register Name | Access | Description |
 | :---: | :--- | :---: | :--- |
-| 31:24 | `MAJOR_VER` | `0x01` | Architecture Major Revision 1.0 |
-| 23:16 | `ARRAY_ROWS` | `0x04` | 4 Processing Element Rows |
-| 15:8 | `ARRAY_COLS` | `0x04` | 4 Processing Element Columns |
-| 7:0 | `PRECISION` | `0x08` | 8-bit Signed Quantized Integer (INT8) |
+| `0x20` | `TIMER_LO` | R/W | Low 32 bits of free-running system cycle counter |
+| `0x24` | `TIMER_HI` | R/W | High 32 bits of free-running system cycle counter |
+| `0x28` | `INSTRET` | R/W | Total instructions retired at Writeback (WB) stage |
+| `0x2C` | `LOAD_USE_STALLS`| R/W | Number of load-use RAW hazard stalls inserted by hazard unit |
+| `0x30` | `BRANCH_FLUSHES` | R/W | Number of pipeline flushes caused by taken branches or jumps |
+| `0x34` | `BUS_STALLS` | R/W | Total clock cycles the CPU was stalled on bus wait states (`dmem_stall`) |
 
-### 5.4 `ACCEL_CFG_LAYER` (`0x8000_100C`) - Layer Configuration
-- **Offset:** `0x0C`
-- **Reset:** `0x0000_0000`
-- **Access:** Read / Write
-- **Fields:**
-  - `Bits [2:0]`: `LAYER_TYPE` (`0` = 2D Convolution, `1` = 2x2 Max Pooling, `2` = Fully Connected).
-  - `Bit 3`: `RELU_EN` (1 = Enable post-activation ReLU clamp).
+---
 
-### 5.5 `ACCEL_SRC_ADDR` (`0x8000_1010`) - Input Feature Map Base Address
-- **Offset:** `0x10`
-- **Reset:** `0x0000_0000`
-- **Access:** Read / Write
-- **Description:** Byte address in memory storing input activation tensor.
+## 4. UART Lite Register Map (`0x8000_0040`)
 
-### 5.6 `ACCEL_DST_ADDR` (`0x8000_1014`) - Output Activation Base Address
-- **Offset:** `0x14`
-- **Reset:** `0x0000_0000`
-- **Access:** Read / Write
-- **Description:** Byte address where resulting layer activations will be stored.
+| Offset | Register Name | Access | Description |
+| :---: | :--- | :---: | :--- |
+| `0x40` | `UART_TX_DATA` | WO | Bits [7:0]: Byte to transmit |
+| `0x44` | `UART_STATUS` | RO | Bit [0]: `TX_READY` (1 = Ready for next byte); Bit [1]: `RX_VALID` |
+| `0x48` | `UART_RX_DATA` | RO | Bits [7:0]: Received byte |
 
-### 5.7 `ACCEL_WEIGHT_ADDR` (`0x8000_1018`) - Weight Tensor Base Address
-- **Offset:** `0x18`
-- **Reset:** `0x0000_0000`
-- **Access:** Read / Write
-- **Description:** Byte address where quantized kernel weights are located.
+---
 
-### 5.8 `ACCEL_BIAS_ADDR` (`0x8000_101C`) - Bias Tensor Base Address
-- **Offset:** `0x1C`
-- **Reset:** `0x0000_0000`
-- **Access:** Read / Write
-- **Description:** Byte address storing 32-bit accumulated biases.
+## 5. INT8 CNN Accelerator Register Map (`0x8000_1000`)
 
-### 5.9 `ACCEL_DIM_IN` (`0x8000_1020`) - Input Spatial Dimensions
-- **Offset:** `0x20`
-- **Fields:** `[15:0]` Channels In, `[31:16]` Spatial Width / Height.
+The memory-mapped register window is translated by `accel_adapter.sv` into standard AXI4-Lite transactions targeting `accel_top.sv`. All offsets have been verified directly against RTL.
 
-### 5.10 `ACCEL_DIM_OUT` (`0x8000_1024`) - Output Spatial Dimensions
-- **Offset:** `0x24`
-- **Fields:** `[15:0]` Channels Out, `[31:16]` Spatial Width / Height.
+| Offset | Register Name | Access | Reset Value | Exact RTL Semantics & Function |
+| :---: | :--- | :---: | :---: | :--- |
+| `0x00` | `ACCEL_CTRL` | R/W | `0x0000_0000` | **Bit [0]:** `START_PULSE` (Write `1` to pulse `start_pulse` to controller FSM)<br>**Bit [1]:** `IRQ_EN` (1 = Assert `accel_irq_out` when layer computation finishes) |
+| `0x04` | `ACCEL_STATUS` | RO | `0x0000_0000` | **Bit [0]:** `BUSY` (1 = Accelerator compute engine active)<br>**Bit [1]:** `DONE` (1 = Computation finished and output buffer valid)<br>**Bit [2]:** `ERR` (1 = Layer configuration error flag asserted) |
+| `0x08` | `ACCEL_VERSION` | RO | `0x0104_0408` | **Hardware Capability & Architecture ID:**<br>Bits [31:24]: `0x01` (Major Version 1)<br>Bits [23:16]: `0x04` (4 Systolic Array Rows)<br>Bits [15:8]: `0x04` (4 Systolic Array Columns)<br>Bits [7:0]: `0x08` (8-bit Quantized INT8 Precision) |
+| `0x0C` | `ADAPTER_STATUS`| R/W | `0x0000_0000` | **Adapter Bus Watchdog & Handshake Status:**<br>**Bit [0]:** `TIMEOUT_ERR` (1 = AXI4-Lite transaction exceeded watchdog limit)<br>**Bit [1]:** `BUSY` (1 = Adapter executing bus transaction)<br>**Bit [2]:** `IRQ_STATUS` (Current interrupt output state)<br>**Bits [31:16]:** Latched watchdog counter value<br>*Write `1` to Bit [0] to clear `TIMEOUT_ERR`.* |
+| `0x10` | `ACCEL_DMA_ADDR` | R/W | `0x0000_0000` | **DMA Address Pointer Register:**<br>Bits [13:0]: Current byte/word offset into accelerator local SRAM. |
+| `0x14` | `ACCEL_DMA_DATA` | WO | `N/A` | **Streaming DMA Data Write Register (Auto-Incrementing):**<br>Bits [7:0]: `dma_wr_data` (Data byte to store)<br>Bits [9:8]: `dma_wr_sel` (Memory Bank Target):<br>&nbsp;&nbsp;&nbsp;&nbsp;`2'd0`: Weights Buffer (4096 x 32-bit)<br>&nbsp;&nbsp;&nbsp;&nbsp;`2'd1`: Feature Ping-Pong Activation Buffer (4096 x 32-bit)<br>&nbsp;&nbsp;&nbsp;&nbsp;`2'd2`: Bias Buffer (256 x 128-bit)<br>*Writing to this register automatically increments `ACCEL_DMA_ADDR` by 1.* |
+| `0x18` | `ACCEL_RES_ADDR` | R/W | `0x0000_0000` | **Result Read Address Register:**<br>Bits [13:0]: Byte offset of the activation/logit to read back from the output buffer. Setting this triggers `res_rd_en` in `mem_ctrl.sv`. |
+| `0x1C` | `ACCEL_RES_DATA` | RO | `N/A` | **Result Read Data Register:**<br>Bits [7:0]: Signed INT8 activation or output logit returned from the output buffer at `ACCEL_RES_ADDR`. |
+| `0x20` | `ACCEL_INSTR_W0` | R/W | `0x0000_0000` | Microcode Instruction Word 0 (Bits [31:0] of 128-bit layer descriptor) |
+| `0x24` | `ACCEL_INSTR_W1` | R/W | `0x0000_0000` | Microcode Instruction Word 1 (Bits [63:32] of 128-bit layer descriptor) |
+| `0x28` | `ACCEL_INSTR_W2` | R/W | `0x0000_0000` | Microcode Instruction Word 2 (Bits [95:64] of 128-bit layer descriptor) |
+| `0x2C` | `ACCEL_INSTR_W3` | R/W | `0x0000_0000` | Microcode Instruction Word 3 (Bits [127:96] of 128-bit layer descriptor) |
+| `0x30` | `ACCEL_INSTR_ADDR`| R/W | `0x0000_0000` | **Instruction Address Trigger Register:**<br>Writing layer PC index [5:0] commits the 128-bit instruction `{INSTR_W3, INSTR_W2, INSTR_W1, INSTR_W0}` into the accelerator's internal microcode instruction RAM (`instruction_mem`). |
 
-### 5.11 `ACCEL_POST_SCALE` (`0x8000_1028`) - Requantization Scale Multiplier
-- **Offset:** `0x28`
-- **Description:** Fixed-point scalar multiplier applied during post-processing.
+---
 
-### 5.12 `ACCEL_POST_SHIFT` (`0x8000_102C`) - Requantization Shift Divisor
-- **Offset:** `0x2C`
-- **Description:** Arithmetic right-shift factor applied to rescale 32-bit accumulators back to 8-bit.
+## 6. Bus Watchdog Semantics & Scope
 
-### 5.13 `ACCEL_PERF_CYCLES` (`0x8000_1030`) - Layer Cycle Counter
-- **Offset:** `0x30`
-- **Access:** Read Only
-- **Description:** Hardware execution cycle count measured directly inside the accelerator for the last completed layer.
+A vital architectural distinction established in this audit:
+
+> **CRITICAL ARCHITECTURAL DISTINCTION: BUS WATCHDOG vs INFERENCE TIMEOUT**
+> The 16-bit watchdog timer in `accel_adapter.sv` (`WATCHDOG_LIMIT = 65,535` clock cycles, approximately **655.35 µs @ 100 MHz**) monitors **INDIVIDUAL AXI4-LITE BUS TRANSACTIONS**, not full CNN inference execution.
+>
+> - **If an AXI slave hangs** on an address handshake (`arready`/`awready`) or data response (`rvalid`/`bvalid`), the watchdog counter expires, drops valid lines, latches `0xDEAD_DEAD`, sets `TIMEOUT_ERR` in `0x8000_100C`, and releases the CPU pipeline stall (`stall = 0`).
+> - **Full CNN inference** takes **53,836 clock cycles** (~538.36 µs @ 100 MHz). This latency is monitored by software polling `ACCEL_STATUS[1]` (`DONE`) or via the hardware interrupt line (`accel_irq_out`).
+> - **Do not confuse** the 65,535-cycle bus watchdog timeout with the 53,836-cycle inference time. The watchdog does NOT expire during inference because no bus transaction is left open while the accelerator is running.
