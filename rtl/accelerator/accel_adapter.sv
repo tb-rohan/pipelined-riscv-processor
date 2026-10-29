@@ -1,6 +1,9 @@
 `timescale 1ns/1ps
 
-module accel_adapter (
+module accel_adapter #(
+  parameter logic [31:0] ADAPTER_VERSION = 32'h01040408,
+  parameter int          WATCHDOG_LIMIT  = 65535
+) (
   input  logic        clk,
   input  logic        rst_n,
 
@@ -34,9 +37,6 @@ module accel_adapter (
   input  logic        accel_irq,
   output logic        irq_status
 );
-
-  localparam logic [31:0] ADAPTER_VERSION = 32'h01040408;
-  localparam int WATCHDOG_LIMIT = 65535;
 
   typedef enum logic [1:0] {
     ST_IDLE  = 2'd0,
@@ -75,6 +75,13 @@ module accel_adapter (
             if (addr[7:0] == 8'h08 && !we) begin
               rdata_latched <= ADAPTER_VERSION;
               state         <= ST_DONE;
+            end else if (addr[7:0] == 8'h0C) begin
+              if (we) begin
+                if (wdata[0]) timeout_err <= 1'b0;
+              end else begin
+                rdata_latched <= {watchdog_cnt, 13'h0, accel_irq, 1'b0, timeout_err};
+              end
+              state <= ST_DONE;
             end else if (we) begin
               state          <= ST_WRITE;
               m_axil_awvalid <= 1'b1;

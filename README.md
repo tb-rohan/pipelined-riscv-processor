@@ -92,16 +92,16 @@ The processor implements the unprivileged 32-bit RISC-V integer base instruction
 
 ## 4. INT8 CNN Accelerator Microarchitecture
 
-The accelerator ( ccel_top.sv / soc_accel_top.sv) executes deep neural network layer pipelines with dedicated spatial hardware:
-- **Systolic Array (pe_array.sv):** 2D mesh of 16 processing elements (PEs) organized in 4 rows and 4 columns.
-  - **Dataflow:** Weight-Stationary (WS) execution. 8-bit signed weights are preloaded into PE registers via w_load_en and held stationary during tile computation.
+The accelerator (`accel_top.sv`) executes deep neural network layer pipelines with dedicated spatial hardware:
+- **Systolic Array (`pe_array.sv`):** 2D mesh of 16 processing elements (PEs) organized in 4 rows and 4 columns.
+  - **Dataflow:** Weight-Stationary (WS) execution. 8-bit signed weights are preloaded into PE registers via `w_load_en` and held stationary during tile computation.
   - **Feature Map Streaming:** 8-bit signed activations stream horizontally (left-to-right) through diagonal wavefront skew registers.
-  - **Partial-Sum Accumulation:** 32-bit signed partial sums accumulate vertically (top-to-bottom) across columns ({\text{out}} \leftarrow P_{\text{in}} + A \times W$) and exit through deskew registers directly into the post-processing pipeline.
-- **Memory Subsystem (soc_mem_ctrl.sv):** Manages on-chip ping-pong activation BRAMs (8 KB) and weight BRAMs (16 KB) with registered boundary counters, driving high-throughput tensor address generation across convolutional tiles.
-- **Post-Processor (post_proc.sv):**
-  - Signed 32-bit bias addition:  + \text{Bias}$.
+  - **Partial-Sum Accumulation:** 32-bit signed partial sums accumulate vertically (top-to-bottom) across columns ($P_{\text{out}} \leftarrow P_{\text{in}} + A \times W$) and exit through deskew registers directly into the post-processing pipeline.
+- **Memory Subsystem (`mem_ctrl.sv`):** Manages on-chip ping-pong activation BRAMs (16 KB) and weight BRAMs (160x RAMB18E1) with registered boundary counters, driving high-throughput tensor address generation across convolutional tiles.
+- **Post-Processor (`post_proc.sv`):**
+  - Signed 32-bit bias addition: $\text{Acc} + \text{Bias}$.
   - Requantization: Fixed-point scaling and arithmetic right-shift with convergent rounding ($+ (1 \ll (\text{shift}-1))$) and clipping to $[-128, 127]$.
-  - Activation & Pooling: ReLU activation and spatial  \times 2$ Max Pooling.
+  - Activation & Pooling: ReLU activation and spatial $2 \times 2$ Max Pooling.
 
 ---
 
@@ -140,14 +140,14 @@ Physical address space decoded by `bus_interconnect.sv`:
 
 ## 6. Firmware Execution & Hardware-Software Co-Design
 
-The software runtime (`firmware/cnn_soc_fw.s`) coordinates end-to-end inference:
+The software runtime (`software/asm/soc_cnn_inference.s`) coordinates end-to-end inference:
 1. **Microcode Dispatch:** CPU writes layer control words (tile counts, dimensions, strides, quantization parameters) into `INSTR_W0..W3` and commits via `INSTR_ADDR`.
 2. **Tensor Streaming:** CPU transfers 28×28 grayscale pixel data to `DMA_ADDR` and `DMA_DATA`.
 3. **Execution Kickoff:** CPU asserts `ACCEL_CTRL[0]` (`START`).
 4. **Hardware Execution:** The accelerator executes Conv1 (3x3), Pool1 (2x2), Conv2 (3x3), Pool2 (2x2), and Dense layers in **53,836 cycles**.
 5. **Status Polling:** CPU polls `ACCEL_STATUS[0]` until busy deasserts and done asserts.
 6. **Result Readback & Argmax:** CPU reads 10 class logits via `RES_ADDR` / `RES_DATA` and executes a software argmax search in RV32I assembly to classify the winning digit.
-7. **Total Latency:** **80,874 clock cycles** (Accelerated compute: 66.6%, Software tensor transfer and argmax: 33.4%).
+7. **Total Latency:** **80,874 clock cycles** (Accelerated compute: 66.57%, Software tensor transfer and argmax: 33.43%).
 
 ---
 
@@ -156,7 +156,7 @@ The software runtime (`firmware/cnn_soc_fw.s`) coordinates end-to-end inference:
 - **Format:** Symmetric INT8 quantization for activations and weights ($[-128, 127]$).
 - **Accumulator:** 32-bit signed two's-complement accumulator ($[-2^{31}, 2^{31}-1]$) providing headroom for up to 16,777,216 MAC accumulations without overflow.
 - **Requantization Formula:**
-  $$\text{Act}_{\text{out}} = \text{clip}\left(\left((Acc_{\text{int32}} + \text{Bias}_{\text{int32}}) \times \text{Scale}\right) \gg \text{Shift}, -128, 127\right)$$
+  $$\text{Act}_{\text{out}} = \text{clip}\left(\left((Acc_{\text{int32}} + \text{Bias}_{\text{int32}}) \times \text{Scale} + (1 \ll (\text{Shift} - 1))\right) \gg \text{Shift}, -128, 127\right)$$
 - **Precision Verification:** Evaluated against an independent Python golden reference model. In full MNIST inference across test samples (e.g., Digit 7 and Digit 2), all 10 hardware output logits match the integer golden model with **zero mismatch (100% bit-exact agreement)**.
 
 ---
@@ -179,10 +179,10 @@ python run_all.py
 | **Accelerator Units** | `tb_pe`, `tb_pe_array`, `tb_post_proc` | 3 | **PASS** | MAC math, systolic propagation, requantization |
 | **Memory & Control** | `tb_mem_ctrl_*`, `tb_ctrl_unit` | 3 | **PASS** | Tensor address generation, zero scan, FSM states |
 | **Accelerator Standalone**| `tb_top`, `tb_full_cnn` | 2 | **PASS** | Standalone 5-layer CNN testbench |
-| **SoC MMIO Adapter** | `tb_accel_adapter.sv` | 1 | **PASS** | Capability reg, watchdog timeout, back-to-back writes |
-| **SoC Multi-Layer** | `tb_soc_workload.sv` | 1 | **PASS** | 3-layer deterministic workload (Conv -> Pool -> FC) |
-| **SoC End-to-End MNIST**| `tb_soc_top.sv` | 3 | **PASS** | Samples #0 (Digit 7), #1 (Digit 2), 10 golden logits verified |
-| **Total** | — | **79** | **100% PASS** | **Zero failures across all suites (Wall time: 33.39 s)** |
+| **SoC MMIO Adapter** | `tb_accel_adapter.sv` | 1 | **PASS** | Capability reg, watchdog timeout abort, W1C status reg |
+| **SoC Multi-Layer** | `tb_riscv_cnn_soc.sv (+CMD=2)` | 1 | **PASS** | 3-layer deterministic workload (Conv -> Pool -> FC) |
+| **SoC End-to-End MNIST**| `tb_riscv_cnn_soc.sv (+CMD=1)` | 3 | **PASS** | Samples #0 (Digit 7), #1 (Digit 2), 10 golden logits verified |
+| **Total** | — | **79** | **100% PASS** | **Zero failures across all suites (Wall time: 30.41 s)** |
 
 ---
 
@@ -240,7 +240,7 @@ python RISC-V/scripts/run_interactive_cpu.py --directed
 python RISC-V/scripts/run_interactive_cpu.py --random --count 50 --seed 42
 
 # 4. Run Multi-Sample MNIST Benchmark (10 test samples)
-python RISC-V/scripts/run_mnist_benchmark.py --samples 10
+python RISC-V/scripts/run_interactive_soc.py --benchmark
 
 # 5. Run Standalone CPU FPGA Synthesis Flow (Vivado)
 cd RISC-V/fpga
