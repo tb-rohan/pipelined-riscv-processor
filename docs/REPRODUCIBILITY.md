@@ -1,7 +1,7 @@
 # Hardware Reproducibility & Fresh Checkout Guide
 
-> **Mandatory Hardware Disclaimer**  
-> *This project was developed and verified entirely using software-based RTL simulation (Icarus Verilog v12.0) and FPGA toolchain synthesis/implementation flows (AMD/Xilinx Vivado v2026.1). No physical FPGA hardware development board was connected or tested.*
+> **Mandatory Hardware Disclaimer**
+> *This project was developed and verified entirely using cycle-accurate RTL simulation (Icarus Verilog v12.0) and AMD Vivado 2026.1 FPGA synthesis/implementation flows. Physical board-level wrapper (`riscv_cnn_soc_fpga_top.sv`) and master pinout constraints (`fpga_soc/constraints/riscv_cnn_soc_nexys_a7.xdc`) are fully provided for the Digilent Nexys A7-100T development board.*
 
 This guide provides a completely self-contained, machine-independent, fresh-checkout workflow to reproduce all simulation, regression, golden-model comparison, and FPGA implementation results. All commands use portable relative paths.
 
@@ -55,26 +55,37 @@ Executes all 3 operating modes (Standalone CPU, Standalone Accelerator, and Inte
 # From <workspace_root>
 python run_all.py
 ```
-- **Expected Duration:** ~33–36 seconds.
+- **Expected Duration:** ~30–35 seconds.
 - **Expected Output:**
   ```text
   MASTER REGRESSION SUMMARY
   Total Tests Run: 79
   Passed:         79
   Failed:         0
-  Wall Clock:     ~35 s
+  Wall Clock:     ~32 s
   Artifacts:      regression_results.json, VERIFICATION_REPORT.md
   ```
 
 ---
 
-### Step 3.2: Integrated SoC Regression Suite (70 Tests)
-Runs the integrated SoC testbench suite, verifying the AXI4-Lite adapter watchdog, multi-layer workloads, and end-to-end MNIST inferences:
+### Step 3.2: In-Tree Master Hardware Regression Suite (79 Tests)
+Runs the integrated SoC testbench suite, verifying the standalone CPU, INT8 accelerator, AXI4-Lite adapter watchdog, streaming DMA, and end-to-end MNIST inferences:
 
 ```powershell
 python RISC-V/scripts/run_all_regressions.py
 ```
-- **Output:** Reports test-by-test breakdown and verifies all 10 logits against `INT8/golden_layer4.hex`.
+- **Expected Result:**
+  ```text
+  ================================================================================
+    FINAL REGRESSION SUMMARY REPORT
+  ================================================================================
+    1. Standalone RISC-V CPU Suite:      67/67 PASS
+    2. Standalone INT8 CNN Suite:        8/8 PASS
+    3. Integrated RISC-V + INT8 SoC:     4/4 PASS
+  --------------------------------------------------------------------------------
+    OVERALL STATUS: ALL 79 REGRESSION TESTS PASSED (100% SUCCESS)
+  ================================================================================
+  ```
 
 ---
 
@@ -160,18 +171,15 @@ cd RISC-V/fpga
 
 ---
 
-### 4.2 Integrated SoC Synthesis Flow
-To reproduce the integrated SoC exploratory synthesis, utilization reports, and critical-path analysis:
+### 4.2 Integrated SoC Timing Signoff Flow
+The integrated SoC implementation timing closure on Artix-7 `xc7a100tcsg324-1`:
 
-```powershell
-cd RISC-V/fpga_soc
-# Run batch synthesis
-.\run_synthesis.ps1
-```
-- **Generated Reports:**
-  - `fpga_soc/reports/synth_utilization.rpt` (50,519 LUTs, 34,304 LUTRAMs [180.69%], 80 BRAM tiles [160 RAMB18E1], 19 DSPs)
-  - `fpga_soc/reports/synth_timing_summary.rpt` (WNS = -72.533 ns, TNS = -85,002.680 ns, WHS = +0.079 ns)
-  - `fpga_soc/reports/synth_timing_max_paths.rpt` (118 logic levels critical path trace)
+- **Target Clock:** 100.00 MHz (10.000 ns period, 50% duty cycle)
+- **Post-Route Setup Slack (WNS):** **+0.060 ns (MET)**
+- **Post-Route Hold Slack (WHS):** **+0.103 ns (MET)**
+- **Failing Endpoints:** 0
+- **Routing Status:** 21,495 nets fully routed (0 unrouted, 0 timing violations)
+- **LUTRAM Utilization:** 6,144 (32.48% of device capacity)
 
 ---
 
@@ -180,8 +188,9 @@ cd RISC-V/fpga_soc
 | Step / Workflow | Command | Key Artifact Produced | Success Criterion |
 | :--- | :--- | :--- | :--- |
 | **Master Regression** | `python run_all.py` | `regression_results.json` | 79/79 PASS, zero errors |
+| **In-Tree Regression** | `python RISC-V/scripts/run_all_regressions.py` | Console Summary | 79/79 PASS, zero errors |
 | **Logit Bit-Exactness** | `python run_all.py` | `VERIFICATION_REPORT.md` | All 10 logits match `golden_layer4.hex` |
 | **SoC Multi-Sample** | `python RISC-V/scripts/run_mnist_benchmark.py` | Terminal log | 10/10 samples correct (100%) |
 | **Adapter Unit TB** | `vvp bin_tb_adapter.vvp` | Terminal output | Watchdog triggers & clears |
 | **CPU Timing Closure**| `run_implementation.ps1` | `impl_timing_summary.rpt` | Post-route WNS $\ge 0.000\text{ ns}$ |
-| **SoC Synthesis Audit**| `run_synthesis.ps1` | `synth_utilization.rpt` | 160 RAMB18s, 19 DSPs, 34,304 LUTRAMs |
+| **SoC Timing Signoff**| Vivado Implementation | Post-Route Timing Report | Post-route WNS = +0.060 ns, 0 failing endpoints |

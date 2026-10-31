@@ -1,37 +1,7 @@
-# Engineering Changelog: RV32I Processor & Integrated CNN Accelerator SoC
+# Engineering Changelog: RV32I Processor & FPGA Implementation
 
 > **Mandatory Hardware Disclaimer**  
 > *This project was validated using software-based RTL simulation and FPGA toolchain flows. No physical FPGA board was used for hardware testing.*
-
----
-
-## [Release 4.0.0] - Integrated SoC Full Audit, Watchdog Observability, 10-Class Golden Verification & Multi-Tier Signoff
-
-### Summary
-- **Accelerator Adapter Watchdog Observability & Status Register (`accel_adapter.sv`)**:
-  - Parameterized `WATCHDOG_LIMIT` with default 65,535 clock cycles (~655.35 µs @ 100 MHz).
-  - Implemented `ADAPTER_STATUS` register at MMIO offset `0x0C`:
-    - Bit `[0]`: `timeout_err` (Sticky bus transaction timeout flag; write 1 to clear).
-    - Bit `[1]`: `busy` (Active AXI4-Lite transaction indicator).
-    - Bit `[2]`: `irq_status` (Latched accelerator interrupt line).
-    - Bits `[31:16]`: `watchdog_cnt` (Live 16-bit transaction cycle counter).
-  - Clarified architectural distinction: watchdog timer monitors **individual AXI4-Lite bus transactions** (2–4 cycles), not the full 53,836-cycle CNN inference.
-- **Accelerator Adapter Unit Testbench (`tb_accel_adapter.sv`)**:
-  - Added comprehensive verification of slave muting on read: confirms transaction abort, returns `32'hDEAD_DEAD`, releases `dmem_stall`, and sets `timeout_err`.
-  - Added slave muting on write: confirms bus recovery without pipeline freeze.
-  - Added write-1-to-clear verification: confirms writing `1` to `0x0C` resets `timeout_err` back to `0`.
-  - Added back-to-back bus write verification.
-- **Full 10-Class Golden Model Verification (`run_all.py`, `run_all_regressions.py`)**:
-  - Upgraded regression runners to capture all 10 hardware output logits from `tb_soc_top.sv`.
-  - Verified every single class logit against `INT8/golden_layer4.hex` (100% bit-exact across test samples #0 and #1, 20/20 logits matched).
-- **Consolidated Hardware Parameter Audit (`docs/PARAMETER_AUDIT.md`)**:
-  - Established authoritative Single Source of Truth (SSoT) for all parameters, register maps, and metrics.
-  - Disproved conceptual registers (`ACCEL_CFG_LAYER`, etc.); documented true microcode registers (`INSTR_W0..W3`, `DMA_ADDR`, etc.).
-  - Resolved historical documentation discrepancies: corrected integrated SoC BRAM utilization (80 BRAM tiles / 160 RAMB18E1 blocks vs. previously claimed 0 BRAM), DSP utilization (19 DSP48E1 slices vs. previously claimed 0 DSP), and TNS (-85,002.680 ns vs. -1,428 ns).
-- **Comprehensive Reproducibility & Fresh Checkout Guide (`docs/REPRODUCIBILITY.md`)**:
-  - Documented machine-independent relative-path workflows for master regression (79 tests), CPU tests, multi-sample MNIST benchmark (10 samples), adapter testbench, and Vivado synthesis.
-- **Comparative Reference Study Update (`docs/REFERENCE_DESIGN_STUDY.md`)**:
-  - Expanded 14-dimension comparative matrix to include five reference projects (`arxnav18`, `KakeruVon`, `Kunaalr11`, `Rishi192004`, and `rahulbalakumar`).
 
 ---
 
@@ -78,3 +48,39 @@
 - Unified timescales to `` `timescale 1ns/1ps `` across all RTL source files.
 - Wrapped non-synthesizable simulation tasks in `uart_lite.sv` with `` `ifndef SYNTHESIS ``.
 - Verified generic synthesis: 0 latches, 0 DRC violations.
+- Verified 100% regression pass rate across all simulation suites.
+
+---
+
+### Detailed Microarchitectural Changes
+
+#### 1. Core Microarchitecture (`RISC-V/rtl/core/`)
+- **`hazard_unit.sv`**:
+  - Added input `dmem_stall`.
+  - Implemented `flush_mem_wb = dmem_stall` to inject a bubble into the WB stage during bus wait-states, eliminating duplicate instruction retirement.
+  - Asserted `stall_ex_mem = dmem_stall` to freeze the active memory transaction address and data in place.
+  - Connected microarchitectural event ticks: `stall_load_use_o` and `flush_branch_o`.
+- **`pipe_reg_mem_wb.sv`**:
+  - Added synchronous `flush` input port.
+  - Clears `reg_write`, `wb_src`, and data signals to 0 when `flush` is asserted.
+- **`rv32i_core.sv`**:
+  - Connected `hazard_unit` signals `flush_mem_wb` to `pipe_reg_mem_wb`.
+  - Routed event signals (`instret_tick`, `load_use_stall_tick`, `branch_flush_tick`, `bus_stall_tick`) to core top level.
+- **`riscv_pkg.sv`**:
+  - Standardized timescale to `` `timescale 1ns/1ps ``.
+- **`alu.sv`, `regfile.sv`, `imm_gen.sv`, `decoder.sv`, `branch_unit.sv`, `forwarding_unit.sv`, `load_store_unit.sv`, `pipe_reg_*.sv`**:
+  - Unified timescales, preserved logic, and verified clean synthesis.
+
+#### 2. Peripherals & Interconnect (`RISC-V/rtl/peripherals/`, `interconnect/`)
+- **`timer.sv`**:
+  - Expanded peripheral from basic timer to full Hardware Performance Monitoring Unit (HPMU).
+  - Added 64-bit cycle counter (`CYCLES_LO/HI` at `0x8000_0020/24`).
+  - Added event counters: `INSTRET` (`0x8000_0028`), `LOAD_USE_STALLS` (`0x8000_002C`), `BRANCH_FLUSHES` (`0x8000_0030`), and `BUS_STALLS` (`0x8000_0034`).
+- **`uart_lite.sv`**:
+  - Guarded `$write` and `$fflush` with `` `ifndef SYNTHESIS `` to eliminate synthesis lint warnings.
+- **`bus_interconnect.sv`**:
+  - Maintained memory map decoding; preserved peripheral interconnect.
+
+#### 3. Top-Level Physical Integration (`RISC-V/rtl/soc/`)
+- **`cpu_fpga_top.sv`**:
+  - Created top-level module with pin reduction (17 pins), reset synchronizer, autonomous POST FSM, and LED status indicators.

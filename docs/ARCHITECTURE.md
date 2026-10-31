@@ -1,49 +1,53 @@
-# System Architecture: Integrated RISC-V CPU + INT8 CNN Accelerator SoC
+# System Architecture: Standalone 5-Stage Pipelined RV32I Processor
 
 > **Mandatory Hardware Disclaimer**  
-> *This project was developed and validated entirely using software-based RTL simulation and FPGA toolchain flows (AMD Vivado v2026.1 and Icarus Verilog v12.0). No physical FPGA board was used for hardware testing.*
-
-This document provides a comprehensive technical specification of the processor microarchitecture, memory subsystem, bus interconnect, accelerator adapter, systolic array compute engine, and hardware-software co-design interfaces.
+> *This project was validated using software-based RTL simulation and FPGA toolchain flows. No physical FPGA board was used for hardware testing.*
 
 ---
 
 ## 1. Top-Level System Architecture
 
-The System-on-Chip (SoC) integrates a 5-stage pipelined RV32I processor core with a dedicated INT8 2D systolic array neural-network accelerator via a memory-mapped AXI4-Lite interconnect (`riscv_cnn_soc_top.sv`):
+The standalone processor subsystem comprises the 5-stage pipelined integer core (`rv32i_core`), independent instruction and data memories (`imem` and `dmem`), memory-mapped peripheral subsystems, and an FPGA-ready physical wrapper (`cpu_fpga_top`):
 
 ```text
-+---------------------------------------------------------------------------------------------------+
-|                                         riscv_cnn_soc_top                                         |
-|                                                                                                   |
-|   +-----------------------+              +----------------------------------------------------+   |
-|   |      rv32i_core       |  Instruction |                    imem (16KB)                     |   |
-|   |                       | <----------  |            (0x0000_0000 - 0x0000_3FFF)             |   |
-|   |  - 5-Stage In-Order   |              +----------------------------------------------------+   |
-|   |  - Data Forwarding    |                                                                       |
-|   |  - Hazard Detection   |  Data Bus    +----------------------------------------------------+   |
-|   |  - Load/Store Unit    | <----------> |                  bus_interconnect                  |   |
-|   |  - Performance Monitor|              +-------------------------+--------------------------+   |
-|   +-----------------------+                                        |                              |
-|                                         +--------------------------+--------------------------+   |
-|                                         |                          |                          |   |
-|                                         v                          v                          v   |
-|                              +---------------------+    +---------------------+    +--------------+
-|                              |     dmem (16KB)     |    |  Core Peripherals   |    |    accel_    |
-|                              |  (0x0000_4000 ..    |    |  (0x8000_0000 ..    |    |   adapter    |
-|                              |   0x0000_7FFF)      |    |   0x8000_005F)      |    | (MMIO->AXI-L)|
-|                              +---------------------+    | - Host Interface    |    +-------+------+
-|                                                         | - 64-bit Timer/HPMU |            |      |
-|                                                         | - UART Lite Transmit|            | AXI4 |
-|                                                         +---------------------+            | Lite |
-|                                                                                            v      |
-|                                                                                    +--------------+
-|                                                                                    | accel_top /  |
-|soc_accel_top |
-|                                                                                    | (INT8 4x4    |
-|                                                                                    |  Systolic    |
-|                                                                                    |  Array Engine|
-|                                                                                    +--------------+
-+---------------------------------------------------------------------------------------------------+
+       +--------------------------------------------------------------------------------+
+       |                               cpu_fpga_top                                     |
+       |  [clk]   [rst_n]   [btn_trigger]   [sw_mode[1:0]]                              |
+       |    |        |             |               |                                    |
+       |    +--------+-------------+---------------+                                    |
+       |    |                      |               |                                    |
+       |    v                      v               v                                    |
+       |  [Reset Sync]     [Heartbeat LED]   [Autonomous POST]                          |
+       |    | (sync_rst_n)         | (1.5 Hz)      | (cmd=14)                           |
+       |    +----------------------+---------------+                                    |
+       |                           |                                                    |
+       |                           v                                                    |
+       |  +--------------------------------------------------------------------------+  |
+       |  |                    cpu_standalone_top                                    |  |
+       |  |                                                                          |  |
+       |  |  +-----------------------+              +-----------------------------+  |  |
+       |  |  |      rv32i_core       |  Instruction |         imem (16KB)         |  |  |
+       |  |  |                       | <----------  | (0x0000_0000 - 0x0000_3FFF) |  |  |
+       |  |  |  - 5-Stage In-Order   |              +-----------------------------+  |  |
+       |  |  |  - Full Forwarding    |                                               |  |
+       |  |  |  - Hazard Detection   |  Data Bus    +-----------------------------+  |  |
+       |  |  |  - Load/Store Unit    | <----------> |      bus_interconnect       |  |  |
+       |  |  |  - Performance Monitor|              +--------------+--------------+  |  |
+       |  |  +-----------------------+                             |                 |  |
+       |  |                                                        |                 |  |
+       |  |         +----------------------------------------------+                 |  |
+       |  |         |                       |                      |                 |  |
+       |  |         v                       v                      v                 |  |
+       |  |  +--------------+      +------------------+   +-----------------+        |  |
+       |  |  | dmem (16KB)  |      |  host_interface  |   |   timer (HPMU)  |        |  |
+       |  |  | (0x0000_4000 |      |  (0x8000_0000 .. |   |  (0x8000_0020 ..|        |  |
+       |  |  |  0x0000_7FFF)|      |   0x8000_001F)   |   |   0x8000_003F)  |        |  |
+       |  |  +--------------+      +------------------+   +-----------------+        |  |
+       |  +--------------------------------------------------------------------------+  |
+       |                           |                                                    |
+       |                           v                                                    |
+       |  [led[7:0]]   [led_done]   [led_pass]   [led_fail]   [led_heartbeat]           |
+       +--------------------------------------------------------------------------------+
 ```
 
 ---
@@ -86,13 +90,17 @@ The processor implements the standard unprivileged 32-bit RISC-V integer base in
    - Multiplexes the destination register data from ALU result, memory read data, $PC + 4$ link address, or upper immediate.
    - Commits write data to `regfile` on the rising clock edge when `reg_write` is active and $rd \neq 0$.
 
-### 2.2 Data Forwarding Network (`forwarding_unit.sv`)
+---
+
+## 3. Hazard Resolution & Forwarding Network
+
+### 3.1 Data Forwarding Network (`forwarding_unit.sv`)
 To minimize Read-After-Write (RAW) pipeline stalls, the forwarding unit routes values directly to the ALU inputs in the EX stage:
 - **Priority 1 (EX/MEM Forwarding)**: If the instruction currently in the MEM stage is writing to a register ($rd \neq 0$) that matches the EX stage source register (`rs1` or `rs2`), data is forwarded directly from the MEM stage ALU output (`mem_fwd_data`).
 - **Priority 2 (MEM/WB Forwarding)**: If the instruction in the WB stage is writing to a register ($rd \neq 0$) that matches the EX stage source register (and was not forwarded by EX/MEM), data is forwarded from the WB stage commit value (`wb_final_data`).
 - **Default**: In the absence of data dependencies, operands are sourced directly from the register file.
 
-### 2.3 Hazard Detection & Multi-Cycle Stall Resolution (`hazard_unit.sv`)
+### 3.2 Hazard Detection Unit (`hazard_unit.sv`)
 - **Load-Use Data Hazard**:
   When an instruction in ID depends on the result of a load instruction currently in EX (`mem_read_ex == 1` and `rd_ex == rs1_id || rd_ex == rs2_id`):
   1. Freezes Program Counter (`stall_pc = 1`) and IF/ID stage (`stall_if_id = 1`) for 1 clock cycle.
@@ -103,109 +111,44 @@ To minimize Read-After-Write (RAW) pipeline stalls, the forwarding unit routes v
   1. PC is updated with the branch/jump target.
   2. Both speculative instructions currently in flight are flushed: `flush_if_id = 1` and `flush_id_ex = 1`.
   3. The branch penalty is **exactly 2 clock cycles**.
-- **Multi-Cycle Bus Stall Resolution (`dmem_stall`)**:
-  When accessing multi-cycle peripherals (such as the accelerator adapter over AXI-Lite), `dmem_stall` asserts:
-  1. Stalls `pc`, `if_id`, `id_ex`, and `ex_mem` to freeze processor pipeline state.
-  2. **Architectural Fix:** Asserts `flush_mem_wb = dmem_stall` to inject a synchronous bubble into the WB stage, preventing duplicate instruction retirement and register corruption while waiting for bus completion.
+- **Bus Wait-State Stalls**:
+  During multi-cycle bus transactions (`dmem_stall == 1`):
+  1. Stalls `pc`, `if_id`, `id_ex`, and `ex_mem`.
+  2. Asserts `flush_mem_wb = dmem_stall` to inject a bubble into the WB stage, preventing duplicate instruction retirement.
 
 ---
 
-## 3. Bus Interconnect & Physical Address Space
+## 4. Memory Architecture & Physical Implementation
 
-The system bus interconnect (`bus_interconnect.sv`) decodes 32-bit physical addresses across memory-mapped targets:
+### 4.1 Memory Map Summary
 
-| Address Range | Target Device | Width | Wait States | Description |
-| :--- | :--- | :---: | :---: | :--- |
-| `0x0000_0000 - 0x0000_3FFF` | `imem` (16 KB) | 32-bit | 0 | Instruction SRAM (combinational read) |
-| `0x0000_4000 - 0x0000_7FFF` | `dmem` (16 KB) | 32-bit | 0 | Data SRAM (byte-write strobes) |
-| `0x8000_0000 - 0x8000_001F` | `host_interface` | 32-bit | 0 | Host control & command mailbox |
-| `0x8000_0020 - 0x8000_003F` | `timer` (HPMU) | 32-bit | 0 | 64-bit cycle counter & event monitors |
-| `0x8000_0040 - 0x8000_005F` | `uart_lite` | 32-bit | 0 | Debug character transmission peripheral |
-| `0x8000_1000 - 0x8000_10FF` | `accel_adapter` | 32-bit | Variable | INT8 CNN Accelerator MMIO-AXI4 Window |
+| Address Region | Range | Device | Size | Semantics |
+| :--- | :--- | :--- | :---: | :--- |
+| **Instruction Memory** | `0x0000_0000 - 0x0000_3FFF` | `imem` | 16 KB | Combinational read, synchronous write |
+| **Data Memory** | `0x0000_4000 - 0x0000_7FFF` | `dmem` | 16 KB | Combinational read, byte-strobe write |
+| **Host Control** | `0x8000_0000 - 0x8000_001F` | `host_interface` | 32 B | Command dispatch & status |
+| **Timer / HPMU** | `0x8000_0020 - 0x8000_003F` | `timer` | 32 B | 64-bit cycle counter & event monitors |
+| **UART Lite** | `0x8000_0040 - 0x8000_005F` | `uart_lite` | 32 B | Character transmission peripheral |
 
----
-
-## 4. INT8 CNN Hardware Accelerator Microarchitecture
-
-The standalone accelerator (`accel_top.sv`) contains four primary hardware blocks:
-
-```text
-                      +---------------------------------------+
-                      |             accel_top                 |
-                      |                                       |
-    AXI4-Lite Write   |   +-------------------------------+   |
-    & Read Channels   |   |          ctrl_unit            |   |
-  ==================> |   |  - Layer sequencer (FSM)      |   |
-                      |   |  - Configuration registers    |   |
-                      |   +---------------+---------------+   |
-                      |                   |                   |
-                      |                   v                   |
-                      |   +---------------+---------------+   |
-                      |   |          mem_ctrl             |   |
-                      |   |  - Tensor address generator   |   |
-                      |   |  - Weight & activation SRAMs  |   |
-                      |   +---------------+---------------+   |
-                      |                   | (INT8 data)       |
-                      |                   v                   |
-                      |   +---------------+---------------+   |
-                      |   |          pe_array             |   |
-                      |   |  - 4x4 Systolic Array (16 PEs)|   |
-                      |   |  - 16 INT8 MACs / cycle       |   |
-                      |   +---------------+---------------+   |
-                      |                   | (INT32 accum)     |
-                      |                   v                   |
-                      |   +---------------+---------------+   |
-                      |   |          post_proc            |   |
-                      |   |  - Bias addition              |   |
-                      |   |  - Scale & right-shift        |   |
-                      |   |  - ReLU & 2x2 Max Pooling     |   |
-                      |   +---------------+---------------+   |
-                      |                   |                   |
-                      |                   v                   |
-                      |       Output Activations (INT8)       |
-                      +---------------------------------------+
-```
-
-### 4.1 Processing Element (`pe.sv`) & Systolic Array (`pe_array.sv`)
-- **Processing Element (PE)**:
-  - Multiplies an 8-bit signed feature map input with an 8-bit signed weight: $A_{\text{int8}} \times W_{\text{int8}}$.
-  - Accumulates incoming partial sum: $P_{\text{out}} \leftarrow P_{\text{in}} + (A_{\text{int8}} \times W_{\text{int8}})$.
-  - Systolic forwarding: registers feature map activations horizontally to the right neighbor PE each clock cycle, while partial sums stream vertically down to the bottom neighbor PE.
-- **Array Architecture**:
-  - $4 \times 4$ 2D mesh of 16 PEs performing 16 multiply-accumulate (MAC) operations per clock cycle in a **Weight-Stationary (WS)** dataflow.
-  - Weights are preloaded into PE registers via `w_load_en` and held stationary during tile computation.
-  - Skewed input registers synchronize activation wavefront propagation across rows, and deskew registers realign partial sum outputs exiting columns.
-
-### 4.2 Post-Processor (`post_proc.sv`)
-- Performs fixed-point requantization:
-  $$\text{Act}_{\text{out}} = \text{clip}\left(\left((Acc_{\text{int32}} + \text{Bias}_{\text{int32}}) \times \text{Scale}\right) \gg \text{Shift}, -128, 127\right)$$
-- Integrates a hardware $2 \times 2$ Max Pooling unit to downsample spatial activations without CPU software intervention.
+### 4.2 Distributed RAM Mapping Rationale
+- The 5-stage pipeline requires single-cycle combinational reads from `imem` in IF and `dmem` in MEM.
+- AMD 7-series Block RAMs (`RAMB36E1`) enforce a mandatory 1-cycle read latency (`always_ff @(posedge clk)`).
+- Consequently, `imem` and `dmem` infer as **Distributed RAM (2,292 LUTs)**.
+- Distributed RAM easily meets timing at 100 MHz (+0.178 ns WNS post-route) without requiring a pipeline redesign.
 
 ---
 
-## 5. Accelerator MMIO-to-AXI-Lite Adapter (`accel_adapter.sv`)
+## 5. Physical Top-Level Wrapper (`cpu_fpga_top.sv`)
 
-Acts as the communication bridge between the single-cycle CPU data bus and the pipelined accelerator core:
-- **Capability Register (`0x08`)**: Reports `32'h01040408` (Major Version 1.0, 4x4 array, 8-bit precision).
-- **Adapter Status & Watchdog Register (`0x0C`)**:
-  - Bit `[0]`: `timeout_err` (Sticky bus transaction timeout; write 1 to clear).
-  - Bit `[1]`: `busy` (Active AXI transaction state).
-  - Bit `[2]`: `irq_status` (Accelerator interrupt status).
-  - Bits `[31:16]`: `watchdog_cnt` (Live 16-bit transaction cycle counter).
-- **AXI4-Lite Master Interface**: Drives write address (`awaddr`), write data (`wdata`), write strobe (`wstrb`), read address (`araddr`), and samples response channels (`bvalid`, `rvalid`).
-- **Hardware Watchdog**: 16-bit cycle timer (`WATCHDOG_LIMIT = 65535` cycles = ~655 µs @ 100 MHz) automatically aborts hung transactions, releases `dmem_stall`, returns `32'hDEAD_DEAD`, and flags `timeout_err`.
-
----
-
-## 6. End-to-End Inference Execution Flow
-
-```text
-[CPU: Load Microcode] -> [CPU: DMA Image Stream] -> [CPU: Write START] -> [ACCEL: Compute 5 Layers] -> [CPU: Poll STATUS] -> [CPU: Read Logits & Argmax]
-```
-
-1. **Microcode Programming**: CPU executes loop writing 128-bit microcode words into `INSTR_W0..W3` (`0x8000_1020..0x8000_102C`) and commits via `INSTR_ADDR` (`0x8000_1030`).
-2. **Input Tensor Streaming**: CPU writes 28x28 grayscale image pixels via `DMA_ADDR` (`0x8000_1010`) and `DMA_DATA` (`0x8000_1014`).
-3. **Inference Trigger**: CPU writes `0x0000_0001` to `ACCEL_CTRL` (`0x8000_1000`).
-4. **Autonomous Accelerator Execution**: The 4x4 systolic array and post-processor compute Conv1 -> Pool1 -> Conv2 -> Pool2 -> Dense layers in 53,836 clock cycles.
-5. **Completion Polling**: CPU polls `ACCEL_STATUS` (`0x8000_1004`) until busy bit [0] de-asserts and done bit [1] asserts.
-6. **Result Readback & Argmax**: CPU reads 10 output class logits via `RES_ADDR` (`0x8000_1018`) and `RES_DATA` (`0x8000_101C`), computing the predicted class index in software. Total SoC latency is 80,874 clock cycles.
+| Port Name | Direction | Width | Pin Count | Function |
+| :--- | :---: | :---: | :---: | :--- |
+| `clk` | Input | 1 | 1 | 100 MHz primary clock |
+| `rst_n` | Input | 1 | 1 | Active-low reset push-button |
+| `btn_trigger`| Input | 1 | 1 | Manual re-trigger push-button |
+| `sw_mode` | Input | 2 | 2 | Operation mode switches (00: ISA, 01: Add, 10: Mul, 11: Div) |
+| `led` | Output | 8 | 8 | 8-bit result visualization LEDs |
+| `led_done` | Output | 1 | 1 | Execution complete indicator |
+| `led_pass` | Output | 1 | 1 | Test pass indicator (`0x50415353`) |
+| `led_fail` | Output | 1 | 1 | Test fail / timeout indicator |
+| `led_heartbeat`| Output | 1 | 1 | 26-bit clock divider heartbeat indicator (~1.5 Hz) |
+| **Total** | — | — | **17** | **8.1% of Artix-7 100T package pins (210 available)** |
